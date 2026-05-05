@@ -1,0 +1,153 @@
+---
+# =============================================================================
+# Workflow: Daily Index Health Check
+#
+# This workflow runs on a scheduled basis and checks the health of the
+# maintenance-target index. It counts documents by status (green/yellow/red)
+# and logs a summary report into the maintenance-logs index automatically.
+# No external tools needed - results are logged directly to Elasticsearch.
+#
+# Author: [Your Name]
+# Date: 2026-05-05
+# Tags: maintenance, scheduled, health-check, elasticsearch, automation
+#
+# Required Permissions:
+# - Elasticsearch: Read access to maintenance-target index
+# - Elasticsearch: Write access to maintenance-logs index
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# CONSTANTS
+# Configure your Elasticsearch connection details here
+# Get your API key from: Kibana -> Stack Management -> API Keys
+# ---------------------------------------------------------------------------
+consts:
+  target_index: "maintenance-target"
+  logs_index: "maintenance-logs"
+  schedule: "0 * * * *"
+
+# ---------------------------------------------------------------------------
+# SCHEDULE
+# Cron format: minute hour day month weekday
+# "0 * * * *"  = every hour
+# "0 0 * * *"  = every day at midnight
+# "0 9 * * 1"  = every Monday at 9am
+# ---------------------------------------------------------------------------
+schedule:
+  cron: "{{ consts.schedule }}"
+
+# ---------------------------------------------------------------------------
+# INPUTS
+# Optional manual trigger inputs for testing
+# ---------------------------------------------------------------------------
+inputs:
+  - name: run_reason
+    type: string
+    description: "Reason for manual run e.g. manual test or scheduled"
+    required: false
+    default: "scheduled"
+
+steps:
+  # -----------------------------------------------------------------------
+  # Step 1: Count total documents in the target index
+  # Purpose: Get overall size of the index being monitored
+  # -----------------------------------------------------------------------
+  - name: count_total_documents
+    type: elasticsearch.search
+    with:
+      index: "{{ consts.target_index }}"
+      body:
+        query:
+          match_all: {}
+        track_total_hits: true
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: 5s
+      continue: false
+
+  # -----------------------------------------------------------------------
+  # Step 2: Count RED status documents
+  # Purpose: Find critical issues that need immediate attention
+  # -----------------------------------------------------------------------
+  - name: count_red_status
+    type: elasticsearch.search
+    with:
+      index: "{{ consts.target_index }}"
+      body:
+        query:
+          term:
+            status: "red"
+        track_total_hits: true
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: 5s
+      continue: false
+
+  # -----------------------------------------------------------------------
+  # Step 3: Count YELLOW status documents
+  # Purpose: Find warnings that should be monitored
+  # -----------------------------------------------------------------------
+  - name: count_yellow_status
+    type: elasticsearch.search
+    with:
+      index: "{{ consts.target_index }}"
+      body:
+        query:
+          term:
+            status: "yellow"
+        track_total_hits: true
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: 5s
+      continue: false
+
+  # -----------------------------------------------------------------------
+  # Step 4: Count GREEN status documents
+  # Purpose: Confirm how many items are healthy
+  # -----------------------------------------------------------------------
+  - name: count_green_status
+    type: elasticsearch.search
+    with:
+      index: "{{ consts.target_index }}"
+      body:
+        query:
+          term:
+            status: "green"
+        track_total_hits: true
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: 5s
+      continue: false
+
+  # -----------------------------------------------------------------------
+  # Step 5: Log the results into maintenance-logs index
+  # Purpose: Save a full health summary report for every run
+  # -----------------------------------------------------------------------
+  - name: log_health_report
+    type: elasticsearch.index
+    with:
+      index: "{{ consts.logs_index }}"
+      body:
+        checked_at: "{{ now() }}"
+        index_name: "{{ consts.target_index }}"
+        run_reason: "{{ inputs.run_reason }}"
+        doc_count: "{{ steps.count_total_documents.hits.total.value }}"
+        health_status: >-
+          {% if steps.count_red_status.hits.total.value > 0 %}red
+          {% elif steps.count_yellow_status.hits.total.value > 0 %}yellow
+          {% else %}green{% endif %}
+        message: >-
+          Health check complete.
+          Total: {{ steps.count_total_documents.hits.total.value }} docs |
+          Red: {{ steps.count_red_status.hits.total.value }} |
+          Yellow: {{ steps.count_yellow_status.hits.total.value }} |
+          Green: {{ steps.count_green_status.hits.total.value }}
+    on-failure:
+      retry:
+        max-attempts: 3
+        delay: 10s
+      continue: false
